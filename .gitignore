@@ -1,0 +1,20 @@
+### 2. `.gitignore`
+
+Create a file named exactly **`.gitignore`** in your project's root directory (right next to `main.py`). Paste these lines inside to ensure your `.env` file and temporary files never get tracked or uploaded to GitHub:
+
+```text
+# Environment configuration file (Keep secret!)
+.env
+
+# Python compilation and cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# OS temporary files
+.DS_Store
+Thumbs.db
+
+# Temp audio files generated during TTS streams
+*.mp3

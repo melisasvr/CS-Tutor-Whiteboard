@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CS Tutor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --desk: #1d2433;
+    --desk-2: #2a3347;
+    --board: #ffffff;
+    --ink: #e8ecf5;
+    --muted: #9aa5bd;
+    --marker: #3b6cf5;
+    --font: "Bricolage Grotesque", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--desk); color: var(--ink);
+    font-family: var(--font); line-height: 1.5;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+  header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  h1 { font-size: 1.6rem; font-weight: 800; margin: 0 auto 0 0; letter-spacing: -0.02em; }
+  input, button, select {
+    font: inherit; border-radius: 10px; border: 1px solid #3a4560;
+    background: var(--desk-2); color: var(--ink); padding: 10px 14px;
+  }
+  input { flex: 1; min-width: 0; }
+  input::placeholder { color: var(--muted); }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--marker); }
+  button.primary { background: var(--marker); border-color: var(--marker); color: #fff; font-weight: 600; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  select { cursor: pointer; }
+  :focus-visible { outline: 3px solid #8fb0ff; outline-offset: 2px; }
+
+  .board-wrap { position: relative; }
+  #stage {
+    position: absolute; top: -12px; left: 14px; background: var(--marker); color: #fff;
+    font-size: 0.85rem; font-weight: 600; padding: 3px 12px; border-radius: 999px; z-index: 1;
+  }
+  canvas {
+    width: 100%; height: auto; display: block; background: var(--board);
+    border-radius: 12px; border: 6px solid #c9ced8; touch-action: none;
+  }
+  #caption {
+    background: var(--desk-2); border-left: 4px solid var(--marker); border-radius: 8px;
+    padding: 12px 16px; min-height: 3.2em; font-size: 1.05rem;
+  }
+  #caption.error { border-left-color: #ff7a7a; color: #ffc9c9; }
+  #chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  #chips button { font-size: 0.92rem; padding: 6px 12px; border-radius: 999px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  #status { color: var(--muted); font-size: 0.85rem; }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>CS Tutor</h1>
+    <input id="topic" value="Arrays vs Linked Lists" aria-label="Topic">
+    <button id="start" class="primary">Start lesson</button>
+  </header>
+
+  <div class="board-wrap">
+    <span id="stage" hidden></span>
+    <canvas id="board" width="800" height="600" aria-label="Tutor whiteboard"></canvas>
+  </div>
+
+  <div id="caption" aria-live="polite">Pick a topic and press Start lesson.</div>
+  <div id="chips"></div>
+
+  <div class="row">
+    <input id="answer" placeholder="Answer or ask the tutor…" aria-label="Your message" disabled>
+    <button id="mic" title="Speak your answer" hidden>Mic</button>
+    <button id="send" class="primary" disabled>Send</button>
+  </div>
+  <div class="row">
+    <button id="next" disabled>Continue</button>
+    <button id="mute">Mute voice</button>
+    <select id="voiceSelect" aria-label="Voice">
+      <option value="marc">Andrew (Male)</option>
+      <option value="anna">Ava (Female)</option>
+      <option value="browser">Browser voice</option>
+    </select>
+    <span id="status" style="margin-left:auto">Not connected</span>
+  </div>
+</main>
+
+<script>
+/* ---------- config ---------- */
+const WS_URL = new URLSearchParams(location.search).get("ws") ||
+  `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
+const STEP_MS = 260;
+
+const $ = id => document.getElementById(id);
+const canvas = $("board"), ctx = canvas.getContext("2d");
+const STAGE_NAMES = {
+  hook: "Hook", mental_model: "Mental model", why: "Why this design",
+  confusions: "Common confusions", formal: "Formal view",
+  mini_project: "Mini project", question: "Question", wait: "Your turn"
+};
+
+let ws = null, muted = false, drawRun = 0;
+let currentAudio = null;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ---------- canvas ---------- */
+function clearBoard() {
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function safeColor(c) { return /^#[0-9a-f]{3,8}$/i.test(c || "") ? c : "#1f2937"; }
+
+function exec(c) {
+  const n = v => Number(v) || 0;
+  ctx.save();
+  const color = safeColor(c.color);
+  ctx.strokeStyle = ctx.fillStyle = color;
+  ctx.lineWidth = n(c.width) || 2;
+  ctx.lineCap = "round";
+
+  switch (c.type) {
+    case "clear":
+      clearBoard(); break;
+    case "text":
+      ctx.font = `${n(c.size) || 18}px ${getComputedStyle(document.body).fontFamily}`;
+      ctx.textAlign = ["left", "center", "right"].includes(c.align) ? c.align : "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(c.text ?? ""), n(c.x), n(c.y)); break;
+    case "rect":
+      ctx.lineWidth = 2;
+      c.fill ? ctx.fillRect(n(c.x), n(c.y), n(c.width), n(c.height))
+             : ctx.strokeRect(n(c.x), n(c.y), n(c.width), n(c.height));
+      break;
+    case "circle":
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(n(c.x), n(c.y), Math.max(1, n(c.radius)), 0, Math.PI * 2);
+      c.fill ? ctx.fill() : ctx.stroke(); break;
+    case "line":
+      ctx.beginPath(); ctx.moveTo(n(c.x1), n(c.y1)); ctx.lineTo(n(c.x2), n(c.y2)); ctx.stroke(); break;
+    case "arrow": {
+      const [x1, y1, x2, y2] = [n(c.x1), n(c.y1), n(c.x2), n(c.y2)];
+      const a = Math.atan2(y2 - y1, x2 - x1), h = 12;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - h * Math.cos(a - 0.4), y2 - h * Math.sin(a - 0.4));
+      ctx.lineTo(x2 - h * Math.cos(a + 0.4), y2 - h * Math.sin(a + 0.4));
+      ctx.closePath(); ctx.fill(); break;
+    }
+    case "label": {
+      const size = n(c.size) || 16;
+      ctx.font = `600 ${size}px ${getComputedStyle(document.body).fontFamily}`;
+      const text = String(c.text ?? ""), w = ctx.measureText(text).width + 16, h = size + 10;
+      ctx.fillStyle = "#eef2ff";
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(n(c.x) - w / 2, n(c.y) - h / 2, w, h, 8)
+                    : ctx.rect(n(c.x) - w / 2, n(c.y) - h / 2, w, h);
+      ctx.fill();
+      ctx.fillStyle = color; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(text, n(c.x), n(c.y)); break;
+    }
+  }
+  ctx.restore();
+}
+
+async function runCommands(commands, run) {
+  for (const c of commands) {
+    if (run !== drawRun) return;
+    try { exec(c); } catch (e) { console.warn("bad command", c, e); }
+    if (c.type !== "clear") await sleep(STEP_MS);
+  }
+}
+
+/* ---------- speech ---------- */
+function stopSpeaking() {
+  speechSynthesis.cancel();
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio = null;
+  }
+}
+
+async function speak(text) {
+  stopSpeaking();
+  if (muted || !text) return;
+
+  const voice = $("voiceSelect").value;
+
+  if (voice === "browser") {
+    (text.match(/[^.!?]+[.!?]*/g) || [text]).forEach(s => {
+      const u = new SpeechSynthesisUtterance(s.trim());
+      u.rate = 1.02;
+      speechSynthesis.speak(u);
+    });
+    return;
+  }
+
+  // Edge TTS via backend
+  try {
+    const url = `/tts?text=${encodeURIComponent(text)}&voice=${voice}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("TTS failed");
+    const blob = await res.blob();
+    const audioUrl = URL.createObjectURL(blob);
+    currentAudio = new Audio(audioUrl);
+    currentAudio.play();
+    currentAudio.onended = () => URL.revokeObjectURL(audioUrl);
+  } catch (err) {
+    console.warn("Edge TTS failed, falling back to browser voice", err);
+    (text.match(/[^.!?]+[.!?]*/g) || [text]).forEach(s => {
+      const u = new SpeechSynthesisUtterance(s.trim());
+      u.rate = 1.02;
+      speechSynthesis.speak(u);
+    });
+  }
+}
+
+/* ---------- websocket ---------- */
+function connect() {
+  return new Promise((resolve, reject) => {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => { $("status").textContent = "Connected"; resolve(); };
+    ws.onerror = () => reject(new Error("Cannot reach the backend at " + WS_URL));
+    ws.onclose = () => { $("status").textContent = "Disconnected"; };
+    ws.onmessage = e => handleReply(JSON.parse(e.data));
+  });
+}
+
+async function send(payload) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) await connect();
+  ws.send(JSON.stringify(payload));
+  setBusy(true);
+}
+
+function setBusy(busy) {
+  ["answer", "send", "next"].forEach(id => $(id).disabled = busy);
+  $("start").disabled = busy;
+  if (busy) $("caption").classList.remove("error");
+  if (busy) $("caption").textContent = "Thinking…";
+}
+
+function handleReply(r) {
+  setBusy(false);
+  if (r.error) {
+    $("caption").textContent = r.error;
+    $("caption").classList.add("error");
+    return;
+  }
+  const run = ++drawRun;
+  $("caption").textContent = r.speak;
+  $("stage").hidden = false;
+  $("stage").textContent = STAGE_NAMES[r.stage] || r.stage;
+  speak(r.speak);
+  runCommands(r.draw_commands, run);
+
+  const chips = $("chips");
+  chips.replaceChildren(...r.suggested_questions.map(q => {
+    const b = document.createElement("button");
+    b.textContent = q;
+    b.onclick = () => sendStudent(q);
+    return b;
+  }));
+  if (r.wait_for_student) $("answer").focus();
+}
+
+/* ---------- UI events ---------- */
+function sendStudent(text) {
+  text = text.trim();
+  if (!text) return;
+  stopSpeaking(); drawRun++;
+  $("answer").value = "";
+  $("chips").replaceChildren();
+  send({ type: "student", text }).catch(showError);
+}
+
+function showError(err) {
+  setBusy(false);
+  $("caption").textContent = err.message;
+  $("caption").classList.add("error");
+}
+
+$("start").onclick = () => {
+  stopSpeaking(); drawRun++; clearBoard();
+  $("chips").replaceChildren();
+  send({ type: "start", topic: $("topic").value.trim() || "Arrays vs Linked Lists" }).catch(showError);
+};
+$("send").onclick = () => sendStudent($("answer").value);
+$("answer").onkeydown = e => { if (e.key === "Enter") sendStudent($("answer").value); };
+$("next").onclick = () => sendStudent("Okay, got it. Please continue to the next stage.");
+$("mute").onclick = () => {
+  muted = !muted;
+  $("mute").textContent = muted ? "Unmute voice" : "Mute voice";
+  if (muted) stopSpeaking();
+};
+
+// Optional voice input
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (SR) {
+  const rec = new SR();
+  rec.lang = "en-US";
+  rec.onresult = e => sendStudent(e.results[0][0].transcript);
+  $("mic").hidden = false;
+  $("mic").onclick = () => { stopSpeaking(); try { rec.start(); } catch {} };
+}
+
+clearBoard();
+</script>
+</body>
+</html>
